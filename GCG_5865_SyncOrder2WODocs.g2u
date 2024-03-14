@@ -1,0 +1,172 @@
+Program.Sub.Preflight.Start
+v.Global.sErrorMsg.Declare(String)
+'will be orderNo and JobSuffix concatentated with || 
+v.Global.sKey.Declare(String)
+Program.Sub.Preflight.End
+
+Program.Sub.Main.Start
+
+F.Intrinsic.Control.SetErrorHandler("Main_Err")
+F.Intrinsic.Control.ClearErrors
+
+V.Local.sError.Declare(String)
+	'coded for benchmark foam, this is a service that will run from online update 38120 and sync up documents from Sales Order header to the Work Order Header for any jobs tied to lines on that sales order. 
+	'instead of running one time from WO Generation, they have docs attached routinely during the process so this will check for added documents to the sales order header only that are not on the work order and add them. 
+	'they attach part docs too, but they can get to those from the custom dasboards in this same doc as well as from the standard doc control link on wo open/view.
+	'coded by SFF 3/7/2020
+	
+	'run from hook 38120 or Task
+
+	f.Intrinsic.UI.InvokeWaitDialog("Syncing Documents from Sales Order Header to Associated Work Order Headers in Document Control (ARC 5865)...")
+	f.ODBC.Connection!con.opencompanyconnection
+	
+	'get docs list based on jobs open that are tied to sales order lines
+	f.Intrinsic.Control.CallSub(GetOrder2WO)
+	'loop through list and compare each doc link record of they exist and add document.
+	f.Intrinsic.Control.CallSub(SyncDocs)
+	f.ODBC.Connection!con.Close
+	f.Intrinsic.UI.CloseWaitDialog
+F.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("Main_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Project: Project",V.Ambient.Newline,V.Ambient.Newline,"Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,v.Global.sErrorMsg)
+
+	'insted of erroring out, write to log table.
+	'set global sKey var for rec. 
+	v.Global.sKey.Set("Main")
+	f.Intrinsic.Control.CallSub(LogError)
+Function.Intrinsic.Control.EndIf
+
+Program.Sub.Main.End
+
+Program.Sub.GetOrder2WO.Start
+F.Intrinsic.Control.SetErrorHandler("GetOrder2WO_Err")
+F.Intrinsic.Control.ClearErrors
+'get docs list based on jobs open that are tied to sales order lines
+V.Local.sError.Declare(String)
+v.Local.sSQL.Declare(String,"select concat(ltrim(rtrim(a.job)),ltrim(rtrim(a.suffix))) as JOBSUFFIX,ltrim(rtrim(a.order_no)) as ORDER_NO from v_ORDER_TO_WO a join v_JOB_HEADER b on a.JOB = b.JOB and a.SUFFIX = b.SUFFIX where b.DATE_CLOSED = '1900-01-01'")
+
+f.Data.DataTable.CreateFromSQL("Order2WO","con",v.Local.sSQL,True)
+f.Intrinsic.Control.If(v.DataTable.Order2WO.RowCount--,=,-1)
+	f.Intrinsic.Control.CallSub(Unload)
+f.Intrinsic.Control.EndIf
+F.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("GetOrder2WO_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Project: Project",V.Ambient.Newline,V.Ambient.Newline,"Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+	v.Global.sKey.Set("GetOrder2WO")
+	f.Intrinsic.Control.CallSub(LogError)
+Function.Intrinsic.Control.EndIf
+
+Program.Sub.GetOrder2WO.End
+
+Program.Sub.SyncDocs.Start
+F.Intrinsic.Control.SetErrorHandler("SyncDocs_Err")
+F.Intrinsic.Control.ClearErrors
+'loop through list and compare each doc link record of they exist and add document.
+V.Local.sError.Declare(String)
+v.Local.i.Declare(Long)
+v.Local.sSQL.Declare(String)
+v.Local.sFile.Declare(String)
+v.Local.iWOLinkID.Declare(Long)
+v.Local.iNewLinkID.Declare(Long)
+v.Local.iSOLinkID.Declare(Long,-1)
+v.Local.bCheck.Declare(Boolean)
+v.Local.sTemp.Declare(String)
+v.Local.ia.Declare(Long)
+v.Local.bFileExist.Declare(Boolean)
+
+'set just incase it blows up before hitting loop
+v.Global.sKey.Set("SyncDocs")
+'type 20 = Work Order Header
+'type 45 = Sales Order Header
+
+f.Intrinsic.Control.For(v.Local.i,0,v.DataTable.Order2WO.RowCount--,1)
+	'set sKey and Msg for wait dialogue
+	f.Intrinsic.String.Build("{0}||{1}",v.DataTable.Order2WO(v.Local.i).ORDER_NO!FieldValTrim,v.DataTable.Order2WO(v.Local.i).JOBSUFFIX!FieldValTrim,v.Global.sKey)
+	f.Intrinsic.String.Build("Checking for Documents and Syncing Documents from Sales Order Header ({0}) to Associated Work Order Header ({1}) in Document Control (ARC 5865)...",v.DataTable.Order2WO(v.Local.i).ORDER_NO!FieldValTrim,v.DataTable.Order2WO(v.Local.i).JOBSUFFIX!FieldValTrim,v.Local.sTemp)
+	f.Intrinsic.UI.ChangeWaitStatus(v.Local.sTemp,v.Local.i,0,v.DataTable.Order2WO.RowCount--)
+	'see if current rec Sales Order has links to sync, if not then skip
+	f.Global.DocumentControl.GetLinkID(v.DataTable.Order2WO(v.Local.i).ORDER_NO!FieldValTrim,45,v.Local.iSOLinkID)
+		
+	f.Intrinsic.Control.If(v.Local.iSOLinkID,<>,-1)
+		
+		'see if link id for job in current rec exists, if it does not then create and copy docs from order_no
+		f.Global.DocumentControl.GetLinkID(v.DataTable.Order2WO(v.Local.i).JOBSUFFIX!FieldValTrim,20,v.Local.iWOLinkID)
+			f.Intrinsic.Control.If(v.Local.iWOLinkID,=,-1)
+				f.Intrinsic.String.Build("Adding Documents from Sales Order Header ({0}) to Associated Work Order Header ({1}) in Document Control (ARC 5865)...",v.DataTable.Order2WO(v.Local.i).ORDER_NO!FieldValTrim,v.DataTable.Order2WO(v.Local.i).JOBSUFFIX!FieldValTrim,v.Local.sTemp)
+				f.Intrinsic.UI.ChangeWaitStatus(v.Local.sTemp,v.Local.i,0,v.DataTable.Order2WO.RowCount--)
+
+				'if docs exist on order and link to woek order header does not exist yet, just copy and move on
+				f.Global.DocumentControl.CreateReference(v.DataTable.Order2WO(v.Local.i).JOBSUFFIX!FieldValTrim,20,v.Local.iWOLinkID)
+				f.Global.DocumentControl.Copy(v.Local.iSOLinkID,v.Local.iWOLinkID,v.Local.bCheck)
+			f.Intrinsic.Control.Else
+				'check for docs that need to be added to work order if they were added to sales order header and not already on work order.
+				f.Intrinsic.String.Build("Select concat(ltrim(rtrim(PATH)),ltrim(rtrim(FILE))) as DOCPATH,FILE_TYPE,DESCRIPTION,GRP_ID from ATG_DOC_ASSOC where LINK_ID = {0} and DOCPATH NOT IN(Select concat(ltrim(rtrim(PATH)),ltrim(rtrim(FILE))) from ATG_DOC_ASSOC where LINK_ID = {1})",v.Local.iSOLinkID,v.Local.iWOLinkID,v.Local.sSQL)
+				f.Data.DataTable.CreateFromSQL("docList","con",v.Local.sSQL,True)
+				f.Intrinsic.Control.If(v.DataTable.docList.RowCount--,<>,-1)
+					f.Intrinsic.String.Build("Adding Documents from Sales Order Header ({0}) to Associated Work Order Header ({1}) in Document Control (ARC 5865)...",v.DataTable.Order2WO(v.Local.i).ORDER_NO!FieldValTrim,v.DataTable.Order2WO(v.Local.i).JOBSUFFIX!FieldValTrim,v.Local.sTemp)
+					f.Intrinsic.UI.ChangeWaitStatus(v.Local.sTemp,v.Local.i,0,v.DataTable.Order2WO.RowCount--)
+
+					f.Intrinsic.Control.For(v.Local.ia,0,v.DataTable.docList.RowCount--,1)
+						'sync each doc if valid filepath
+						f.Intrinsic.File.Exists(v.DataTable.docList(v.Local.ia).DOCPATH!FieldValTrim,v.Local.bFileExist)
+						f.Intrinsic.Control.If(v.Local.bFileExist,=,True)
+							f.Global.DocumentControl.AddDocument(v.Local.iWOLinkID,v.DataTable.docList(v.Local.ia).DOCPATH!FieldValTrim,v.DataTable.docList(v.Local.ia).DESCRIPTION!FieldValTrim,v.DataTable.docList(v.Local.ia).GRP_ID!FieldValTrim,v.DataTable.docList(v.Local.ia).FILE_TYPE!FieldValTrim)
+
+						f.Intrinsic.Control.EndIf
+					f.Intrinsic.Control.Next(v.Local.ia)
+					
+				f.Intrinsic.Control.EndIf
+				f.Data.DataTable.Close("docList")
+				
+			f.Intrinsic.Control.EndIf
+		
+	f.Intrinsic.Control.EndIf
+	
+f.Intrinsic.Control.Next(v.Local.i)
+
+F.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("SyncDocs_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Project: Project",V.Ambient.Newline,V.Ambient.Newline,"Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,v.Global.sErrorMsg)
+
+	f.Intrinsic.Control.CallSub(LogError)
+Function.Intrinsic.Control.EndIf
+
+Program.Sub.SyncDocs.End
+
+Program.Sub.LogError.Start
+
+F.Intrinsic.Control.SetErrorHandler("LogError_Err")
+F.Intrinsic.Control.ClearErrors
+
+V.Local.sError.Declare(String)
+v.Local.sSQL.Declare(String)
+
+'this table is only for GSS debugging purposes on the service because it runs unattended from GSS Server, customer has no access to this.
+'write log to table in this sub, if errors out in here just end. 
+f.Intrinsic.String.Build("insert into GCG_5865_ERROR_LOG values('{0}','{1}','{2}')",v.Ambient.Now.PervasiveDate,v.Global.sErrorMsg.Trim,v.Global.sKey,v.Local.sSQL)
+f.ODBC.Connection!con.execute(v.Local.sSQL)
+
+'clean up records older than 60 days or more, only doing this if error is called.
+f.Intrinsic.String.Build("delete from GCG_5865_ERROR_LOG where Er_Date <= dateadd(day,-60,'{0}')",v.Ambient.Now.PervasiveDate,v.Local.sSQL)
+f.ODBC.Connection!con.execute(v.Local.sSQL)
+F.Intrinsic.Control.ExitSub
+
+F.Intrinsic.Control.Label("LogError_Err")
+F.Intrinsic.Control.If(V.Ambient.ErrorNumber,<>,0)
+	Function.Intrinsic.String.Concat("Project: Project",V.Ambient.Newline,V.Ambient.Newline,"Subroutine: ",V.Ambient.CurrentSubroutine,V.Ambient.NewLine,"Error Occurred ",V.Ambient.ErrorNumber," with description ",V.Ambient.ErrorDescription,V.Local.sError)
+
+	f.ODBC.Connection!con.Close
+	f.Intrinsic.Control.End
+Function.Intrinsic.Control.EndIf
+Program.Sub.LogError.End
+
+Program.Sub.Unload.Start
+f.ODBC.Connection!con.Close
+f.Intrinsic.Control.End
+Program.Sub.Unload.End
